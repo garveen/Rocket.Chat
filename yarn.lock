@@ -9794,6 +9794,7 @@ __metadata:
     postcss-scss: "npm:^4.0.9"
     postcss-selector-not: "npm:^8.0.1"
     preact: "npm:~10.25.4"
+    preact-render-to-string: "npm:^6.6.5"
     preact-router: "npm:^4.1.2"
     query-string: "npm:^7.1.3"
     react: "npm:~18.3.1"
@@ -24167,13 +24168,23 @@ __metadata:
   languageName: node
   linkType: hard
 
-"hash-base@npm:~3.0, hash-base@npm:~3.0.4":
+"hash-base@npm:~3.0":
   version: 3.0.4
   resolution: "hash-base@npm:3.0.4"
   dependencies:
     inherits: "npm:^2.0.1"
     safe-buffer: "npm:^5.0.1"
   checksum: 10/878465a0dfcc33cce195c2804135352c590d6d10980adc91a9005fd377e77f2011256c2b7cfce472e3f2e92d561d1bf3228d2da06348a9017ce9a258b3b49764
+  languageName: node
+  linkType: hard
+
+"hash-base@npm:~3.0.4":
+  version: 3.0.5
+  resolution: "hash-base@npm:3.0.5"
+  dependencies:
+    inherits: "npm:^2.0.4"
+    safe-buffer: "npm:^5.2.1"
+  checksum: 10/6a82675a5de2ea9347501bbe655a2334950c7ec972fd9810ae9529e06aeab8f7e8ef68fc2112e5e6f0745561a7e05326efca42ad59bb5fd116537f5f8b0a216d
   languageName: node
   linkType: hard
 
@@ -32057,6 +32068,15 @@ __metadata:
   version: 2.2.0
   resolution: "postis@npm:2.2.0"
   checksum: 10/f7a872ad65a80b52f58b5217f917b6fc35dbd503019374cf813207c30e85b4fdf38e275a7faf1a393af554e258321bcda58b3b60c4a13c22d6c70527e16ba730
+  languageName: node
+  linkType: hard
+
+"preact-render-to-string@npm:^6.6.5":
+  version: 6.6.5
+  resolution: "preact-render-to-string@npm:6.6.5"
+  peerDependencies:
+    preact: ">=10 || >= 11.0.0-0"
+  checksum: 10/8d5bbde63857e3b4a0113c8e8d53b1f700cd14c6ee0e0a841aba30939930877e59ae1850bc74e1f369abdc21fd069af04f47fa7943f1b377ecd05366ab1353e6
   languageName: node
   linkType: hard
 
