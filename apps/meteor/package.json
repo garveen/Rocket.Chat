@@ -468,7 +468,7 @@
 	},
 	"meteor": {
 		"mainModule": {
-			"client": "client/main.ts",
+			"client": "client/noop.ts",
 			"server": "server/main.ts"
 		}
 	},
