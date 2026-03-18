@@ -1,7 +1,7 @@
 import { Abac } from '@rocket.chat/core-services';
 import type { AbacActor } from '@rocket.chat/core-services';
 import type { IServerEvents, IUser } from '@rocket.chat/core-typings';
-import { ServerEvents, Users } from '@rocket.chat/models';
+import { ServerEvents, Users, getAllowDiskUse } from '@rocket.chat/models';
 import { validateUnauthorizedErrorResponse } from '@rocket.chat/rest-typings/src/v1/Ajv';
 import { convertSubObjectsIntoPaths } from '@rocket.chat/tools';
 
@@ -393,7 +393,7 @@ const abacEndpoints = API.v1
 					sort: _sort,
 					skip: offset,
 					limit: count,
-					allowDiskUse: true,
+					...getAllowDiskUse(),
 				},
 			);
 
