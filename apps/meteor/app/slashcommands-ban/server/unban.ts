@@ -3,7 +3,7 @@ import type { SlashCommandCallbackParams } from '@rocket.chat/core-typings';
 import { Users } from '@rocket.chat/models';
 
 import { i18n } from '../../../server/lib/i18n';
-import { unbanUserFromRoomMethod } from '../../../server/methods/unbanUserFromRoom';
+import { unbanUserFromRoomMethod } from '../../../server/lib/unbanUserFromRoom';
 import { sanitizeUsername } from '../../lib/server/methods/addUsersToRoom';
 import { settings } from '../../settings/server';
 import { slashCommands } from '../../utils/server/slashCommand';
