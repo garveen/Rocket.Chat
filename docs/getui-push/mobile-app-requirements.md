@@ -52,30 +52,44 @@
 
 #### 3.2.1 描述
 
-用户需要登录 Rocket.Chat 服务器以关联推送 Token。应用需要支持以下登录方式（按优先级）：
-
-1. **WebView 登录**（主要方案）：在应用内嵌入 WebView 加载 Rocket.Chat 登录页面，通过拦截登录回调获取认证信息
-2. **跳转官方App登录**（如果官方App支持 OAuth/SSO 回调）：跳转到已安装的官方App完成登录流程
+用户需要登录 Rocket.Chat 服务器以关联推送 Token。服务端已配置 OAuth 认证（禁止直接注册账号），本应用采用 **OAuth 2.0 PKCE（Proof Key for Code Exchange）** 流程进行登录。PKCE 专为无法安全存储客户端密钥的公共客户端（如手机 App）设计，即使 APK 被反编译也不会泄露任何密钥。
 
 #### 3.2.2 功能要求
 
 - **FR-001-1**: 提供服务器地址输入界面，用户输入 Rocket.Chat 服务器 URL
 - **FR-001-2**: 验证服务器地址有效性（调用 `/api/v1/info` 接口）
-- **FR-001-3**: 打开 WebView 加载服务器登录页面
-- **FR-001-4**: 拦截登录成功回调，获取 `authToken` 和 `userId`
-- **FR-001-5**: 安全存储认证信息（使用设备安全存储）
-- **FR-001-6**: 支持自动登录（使用已保存的认证信息）
-- **FR-001-7**: 登录成功后自动注册个推 Token
+- **FR-001-3**: 应用在本地生成 `code_verifier`（随机高熵字符串）及对应的 `code_challenge`（`BASE64URL(SHA256(code_verifier))`）
+- **FR-001-4**: 打开 WebView 加载服务器 OAuth 授权页面（`/oauth/authorize?response_type=code&client_id=...&code_challenge=...&code_challenge_method=S256&redirect_uri=...`），服务器端会通过已配置的 OAuth 提供商完成身份验证
+- **FR-001-5**: WebView 拦截重定向 URL，从中提取授权码（`code`）
+- **FR-001-6**: 应用使用授权码 + `code_verifier` 调用 `/oauth/token`，**无需** `client_secret`，换取访问令牌及用户信息（通过 `userId` 与服务端已有 OAuth 用户匹配）
+- **FR-001-7**: 安全存储认证信息（使用设备安全存储）
+- **FR-001-8**: 支持自动登录（使用已保存的认证信息）
+- **FR-001-9**: 登录成功后自动注册个推 Token
 
-#### 3.2.3 WebView 登录流程
+#### 3.2.3 OAuth PKCE 登录流程
 
 ```
 用户输入服务器地址
   → 验证服务器 (/api/v1/info)
-  → 打开 WebView: {serverUrl}/
-  → 用户在 WebView 中登录
-  → 拦截 URL 或 Cookie 获取 authToken
-  → 调用 /api/v1/me 验证 Token 有效
+  → 生成 code_verifier（随机 64 字节，Base64URL 编码）
+  → 计算 code_challenge = BASE64URL(SHA256(code_verifier))
+  → 打开 WebView:
+      {serverUrl}/oauth/authorize
+        ?response_type=code
+        &client_id={publicClientId}
+        &redirect_uri=rcpush://oauth
+        &code_challenge={code_challenge}
+        &code_challenge_method=S256
+  → 服务器通过已有 OAuth 提供商完成身份验证
+  → 服务器重定向至 rcpush://oauth?code={authCode}
+  → WebView 拦截重定向，关闭 WebView，提取 authCode
+  → POST {serverUrl}/oauth/token
+      { grant_type: 'authorization_code',
+        code: authCode,
+        redirect_uri: 'rcpush://oauth',
+        client_id: publicClientId,
+        code_verifier: code_verifier }
+  → 获取 access_token（即 RC authToken）及用户 ID
   → 保存认证信息
   → 登录成功
 ```
@@ -84,7 +98,7 @@
 
 - 用户可输入有效的 Rocket.Chat 服务器地址
 - 无效地址给出明确错误提示
-- WebView 登录后能正确获取认证信息
+- OAuth PKCE 流程完成后能正确获取认证信息
 - 认证信息安全存储，不明文保存
 - 应用重启后能自动登录
 - 登录成功后个推 Token 自动注册
@@ -198,33 +212,32 @@ Android 端:
 
 #### 3.6.1 描述
 
-用户点击推送通知后，应尝试跳转到 Rocket.Chat 官方 App 的对应消息位置。
+用户点击推送通知后，应尝试跳转到 Rocket.Chat 官方 App 的对应消息位置。**禁止**使用 WebView 打开具体消息页面；如官方 App 未安装，则在应用内以原生界面显示通知摘要信息。
 
 #### 3.6.2 功能要求
 
-- **FR-005-1**: 点击通知后尝试通过 Deep Link 打开官方App
+- **FR-005-1**: 点击通知后尝试通过 Deep Link 打开官方 App
 - **FR-005-2**: Deep Link 格式: `rocketchat://room/{rid}?messageId={msgId}&host={serverUrl}`
-- **FR-005-3**: 如果官方App未安装，在个推App内打开 WebView 显示消息
-- **FR-005-4**: WebView 备用方案: 加载 `{serverUrl}/channel/{roomName}?msg={msgId}`
-- **FR-005-5**: 如果 Deep Link 跳转失败（官方App不支持此链接格式），回退到 WebView 方案
+- **FR-005-3**: 如果官方 App 未安装，或 Deep Link 跳转失败，则在应用内使用**原生通知详情页**展示通知摘要（标题、正文、发送者、频道），不使用 WebView
+- **FR-005-4**: 原生通知详情页提供"打开 Rocket.Chat 官方 App"或"前往应用市场下载"的按钮
 
 #### 3.6.3 跳转流程
 
 ```
 用户点击推送通知
-  → 解析通知负载 (rid, msgId, host, roomName)
-  → 检查官方App是否安装
+  → 解析通知负载 (rid, msgId, host, roomName, senderName)
+  → 检查官方 App 是否安装
   ├─ 已安装 → 构建 Deep Link → 尝试跳转
   │           ├─ 跳转成功 → 完成
-  │           └─ 跳转失败 → 回退到 WebView
-  └─ 未安装 → 打开 WebView 加载消息页面
+  │           └─ 跳转失败 → 跳转到原生通知详情页
+  └─ 未安装 → 跳转到原生通知详情页（不使用 WebView）
 ```
 
 #### 3.6.4 验收标准
 
-- 点击通知后能尝试跳转到官方App
-- 官方App未安装时回退到 WebView 浏览
-- 跳转后能定位到对应的消息位置
+- 点击通知后能尝试跳转到官方 App
+- 官方 App 未安装或跳转失败时，回退到原生通知详情页（无 WebView）
+- 整个跳转过程中不打开任何 WebView 页面
 - 跳转过程流畅，无明显延迟
 
 ---
@@ -320,7 +333,8 @@ Android 端:
 |------|------|------|
 | NR-009 | 认证信息存储 | 使用设备安全存储（Android KeyStore / 鸿蒙安全存储） |
 | NR-010 | 网络传输 | 推荐 HTTPS，HTTP 仅在开发环境允许 |
-| NR-011 | WebView 安全 | 限制 WebView 的 JavaScript 调用能力 |
+| NR-011 | WebView 限制 | 应用内**仅**允许在 OAuth 登录流程中使用 WebView；消息内容及其他页面必须使用原生界面，不得使用 WebView |
+| NR-012 | 鉴权安全 | 使用 OAuth 2.0 PKCE 流程；不在 App 包中嵌入任何 OAuth 客户端密钥（client_secret） |
 
 ### 4.4 用户体验
 
@@ -447,6 +461,8 @@ Android 端:
 3. **推送依赖**: 依赖个推 SDK 和个推推送通道
 4. **官方App兼容**: 跳转功能受限于官方App对 Deep Link 的支持程度
 5. **鸿蒙 Next 限制**: 鸿蒙 Next 的 uni-app 支持可能尚不完善，需评估
+6. **WebView 限制**: 应用内 WebView **仅**允许用于 OAuth 登录流程，其他页面（含消息详情）必须使用原生界面
+7. **鉴权限制**: 不得在 App 中嵌入 OAuth client_secret；使用 PKCE 流程确保即使 APK 被反编译也不会泄露密钥
 
 ### 6.2 假设
 
@@ -479,5 +495,5 @@ Android 端:
 | 版本 | 功能范围 | 预计 |
 |------|----------|------|
 | v1.0 | 登录、推送接收、基本通知展示 | MVP |
-| v1.1 | 点击跳转官方App、WebView 回退 | 快速迭代 |
+| v1.1 | 点击跳转官方App、原生通知详情页 | 快速迭代 |
 | v1.2 | 多服务器支持、通知管理 | 后续规划 |
