@@ -52,6 +52,7 @@ Rocket.Chat Apps-Engine 提供以下机制供插件使用：
 | PR-007 | 推送日志 | P1 | 记录推送日志以便故障排查 |
 | PR-008 | Token 上限管理 | P1 | 限制每个用户的 Token 数量（默认上限 1） |
 | PR-009 | 用户登出清理 | P1 | 用户登出时自动清理该用户的个推 Token |
+| PR-010 | 用户频道通知偏好缓存 | P1 | 注册 Token 时获取并缓存用户的频道级别通知偏好，推送时过滤 |
 
 ### 2.2 非功能需求
 
@@ -263,6 +264,8 @@ IPostMessageSent.executePostMessageSent()
   → 获取房间成员列表（read.getRoomReader().getMembers(roomId)）
   → 排除消息发送者（message.sender.id）
   → 从 IPersistence 查询这些用户的个推 Token（CID）
+  → 对每个有 Token 的用户，从 IPersistence 读取其频道通知偏好缓存
+  → 过滤掉 disableNotifications=true 或 mobilePushNotifications='nothing' 的用户
   → 构建推送内容
   → 调用个推批量推送 API（IHttp）
 ```
@@ -274,7 +277,10 @@ IPostMessageSent.executePostMessageSent()
 - **FR-004-3**: 获取房间所有成员，排除消息发送者
 - **FR-004-4**: 批量查询成员的个推 Token，仅向有有效 Token 的用户发送推送
 - **FR-004-5**: 推送对所有用户消息都触发（不仅限于 @提及）
-- **FR-004-6**: [已知限制] 不检查用户的移动通知偏好设置（Apps-Engine 未暴露此字段）
+- **FR-004-6**: 从 `IPersistence` 读取每个用户的频道通知偏好缓存，过滤不应收到推送的用户：
+  - `disableNotifications === true` → 跳过该用户
+  - `mobilePushNotifications === 'nothing'` → 跳过该用户
+  - 偏好未缓存时（新用户首次使用等）→ 默认推送（fail-safe）
 
 #### 3.4.4 推送内容格式
 
@@ -399,6 +405,67 @@ IPostMessageSent.executePostMessageSent()
 - **FR-009-2**: 在 `executePostUserLoggedOut` 中删除该用户的所有 Token
 - **FR-009-3**: 清理失败（如存储异常）时记录错误日志，不影响登出流程
 
+---
+
+### 3.10 PR-010: 用户频道通知偏好缓存
+
+#### 3.10.1 描述
+
+通过 RC REST API 获取用户在各频道的通知偏好（如"禁用通知"、"推送级别"），缓存至 `IPersistence`，在消息推送时用于过滤不应收到通知的用户。
+
+#### 3.10.2 技术背景
+
+Apps-Engine 的 `IUser` 对象不暴露每频道通知偏好，但 `IApiRequest.headers` 包含完整的原始 HTTP 请求头（含 `x-auth-token` 和 `x-user-id`）。插件可在 Token 注册端点处：
+
+1. 提取 `request.headers['x-auth-token']` 和 `request.headers['x-user-id']`
+2. 使用 `IHttp` 调用 `GET {siteUrl}/api/v1/subscriptions.get`
+3. 从响应中提取每个频道（`rid`）的通知偏好字段
+
+#### 3.10.3 可获取的偏好字段
+
+来自 `ISubscription`（`/api/v1/subscriptions.get` 返回数据）：
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `rid` | string | 频道 ID |
+| `mobilePushNotifications` | `'all' \| 'mentions' \| 'nothing' \| undefined` | 该频道的移动推送级别；`undefined` 表示使用系统默认 |
+| `disableNotifications` | `boolean \| undefined` | `true` 表示该用户已完全禁用此频道的所有通知 |
+
+#### 3.10.4 功能要求
+
+- **FR-010-1**: 在 Token 注册端点中，使用用户的 `x-auth-token` 调用 `GET {siteUrl}/api/v1/subscriptions.get` 获取其所有频道订阅数据
+- **FR-010-2**: 将每个频道的 `{ rid, mobilePushNotifications, disableNotifications }` 存入 `IPersistence`，关联到用户 ID
+- **FR-010-3**: 偏好数据存储时附带 `fetchedAt` 时间戳，用于过期判断
+- **FR-010-4**: 偏好数据 TTL 默认 24 小时，可通过插件设置 `Getui_Pref_Cache_TTL_Hours` 调整
+- **FR-010-5**: 在 `IPostMessageSent` 触发时，从 `IPersistence` 读取收件人的频道偏好，过滤 `disableNotifications=true` 或 `mobilePushNotifications='nothing'` 的用户
+- **FR-010-6**: 若某用户的偏好缓存不存在或已过期，则默认推送（fail-safe），并异步触发刷新
+- **FR-010-7**: 提供 `POST /api/apps/public/{appId}/sync-prefs` 端点（需要鉴权），供手机 App 主动触发偏好刷新；同时支持每次 Token 注册时自动刷新
+
+#### 3.10.5 偏好缓存数据结构
+
+```typescript
+interface UserChannelPrefs {
+  userId: string;
+  prefs: Array<{
+    rid: string;
+    mobilePushNotifications?: 'all' | 'mentions' | 'nothing';
+    disableNotifications?: boolean;
+  }>;
+  fetchedAt: string;  // ISO 日期字符串
+}
+```
+
+存储关联：
+- `RocketChatAssociationModel.USER` + `userId`
+- `RocketChatAssociationModel.MISC` + `prefs:${userId}`
+
+#### 3.10.6 验收标准
+
+- Token 注册成功后，`IPersistence` 中存在该用户的通知偏好缓存
+- 消息推送时，`disableNotifications=true` 或 `mobilePushNotifications='nothing'` 的用户不会收到推送
+- 偏好缓存过期后，下一次 Token 注册或 sync-prefs 调用会自动更新缓存
+- 偏好缓存不存在时，默认推送（不因缓存缺失而漏推）
+
 ## 4. 约束与假设
 
 ### 4.1 约束
@@ -407,7 +474,8 @@ IPostMessageSent.executePostMessageSent()
 2. **Apps-Engine 版本**: 目标插件 API 兼容当前 Rocket.Chat 版本的 Apps-Engine
 3. **批量推送限制**: 单次请求最多 200 个 CID，需分批处理
 4. **用户账号限制**: 服务端不允许直接注册用户；所有用户必须来自已配置的 OAuth 提供商
-5. **用户通知偏好**: 插件不检查用户的移动通知偏好（已知限制），依赖用户主动删除 Token 退出推送
+5. **偏好缓存时效性**: 通知偏好在 Token 注册时更新，不能实时反映用户更改；偏好过期后默认推送
+6. **偏好获取范围**: `mobilePushNotifications` 偏好支持 `all`（全部消息）/ `mentions`（仅@提及）/ `nothing`（不推送）三档；本插件当前仅过滤 `nothing`，`mentions` 场景（非@消息）暂不过滤（插件无法从服务端判断是否为提及，需后续版本改进）
 
 ### 4.2 假设
 

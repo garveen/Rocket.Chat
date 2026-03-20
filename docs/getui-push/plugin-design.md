@@ -43,10 +43,12 @@
 | `GetuiAuthService` | 个推鉴权 Token 获取与缓存 | `services/GetuiAuthService.ts` |
 | `GetuiPushService` | 批量推送逻辑 | `services/GetuiPushService.ts` |
 | `TokenService` | 个推 Token 的增删查 | `services/TokenService.ts` |
+| `PreferenceService` | 用户频道通知偏好获取与缓存 | `services/PreferenceService.ts` |
 | `ContentBuilder` | 推送内容构建 | `services/ContentBuilder.ts` |
 | `GetuiTokenEndpoint` (POST) | Token 注册端点 | `endpoints/GetuiTokenRegisterEndpoint.ts` |
 | `GetuiTokenEndpoint` (DELETE) | Token 删除端点 | `endpoints/GetuiTokenDeleteEndpoint.ts` |
 | `InfoEndpoint` | 插件信息/发现端点 | `endpoints/InfoEndpoint.ts` |
+| `SyncPrefsEndpoint` | 用户偏好刷新端点 | `endpoints/SyncPrefsEndpoint.ts` |
 | `GetUiPushCommand` | `/getui-push` Slash 命令 | `commands/GetUiPushCommand.ts` |
 | `PostMessageSentHandler` | 消息发送事件处理 | `handlers/PostMessageSentHandler.ts` |
 | `PostUserLoggedOutHandler` | 用户登出事件处理 | `handlers/PostUserLoggedOutHandler.ts` |

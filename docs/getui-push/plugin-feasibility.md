@@ -82,9 +82,18 @@ Apps-Engine 为插件提供以下核心能力：
 | 构建推送内容 | ✅ 纯业务逻辑 |
 | 调用个推 API | ✅ 使用 `IHttp` |
 | 异步执行（不阻塞消息保存） | ✅ `executePostMessageSent` 是在消息保存后调用，不阻塞原流程 |
-| **检查用户移动通知偏好** | ⚠️ Apps-Engine `IUser.settings.preferences` 仅暴露 `language` 字段，不包含移动通知偏好 |
+| **检查用户移动通知偏好** | ✅ 可行（见下方详细说明） |
 
-**结论：✅ 可行（用户通知偏好检查为已知限制，见第 4 节）**
+**关于用户移动通知偏好的获取机制**：
+
+Apps-Engine 的 `IUser.settings.preferences` 仅暴露 `language` 字段，**但** Apps-Engine 的 `IApiRequest.headers` 包含原始 HTTP 请求头（含 `x-auth-token` 和 `x-user-id`）。当手机 App 调用 Token 注册端点时，插件可：
+
+1. 从 `request.headers['x-auth-token']` 和 `request.headers['x-user-id']` 中提取用户凭证
+2. 使用这些凭证调用 `GET {siteUrl}/api/v1/subscriptions.get`，获取该用户在所有频道的完整订阅信息（含 `mobilePushNotifications`、`disableNotifications`、`muteGroupMentions` 字段）
+3. 将各频道的通知偏好数据缓存到 `IPersistence`（按 userId + rid 双重关联）
+4. 在 `IPostMessageSent` 触发时读取缓存判断是否推送
+
+**结论：✅ 完全可行**（通过 Token 注册时机主动获取并缓存用户订阅偏好）
 
 ---
 
@@ -137,16 +146,48 @@ Apps-Engine 为插件提供以下核心能力：
 
 ## 4. 已知限制与缓解措施
 
-### 4.1 用户移动通知偏好检查
+### 4.1 用户移动通知偏好检查（已解决）
 
-**问题**：Apps-Engine 未暴露用户的移动通知偏好设置（如"关闭移动端推送"），因此无法实现与嵌入式方案等同的 `shouldNotifyMobile()` 检查。
+~~**问题**：Apps-Engine 未暴露用户的移动通知偏好设置（如"关闭移动端推送"），因此无法实现与嵌入式方案等同的 `shouldNotifyMobile()` 检查。~~
 
-**缓解措施**：
-- 个推 App 推送给房间内所有拥有有效 Token 的成员（不过滤通知偏好）
-- 若用户不希望接收个推推送，应在个推 App 内登出（删除 Token），而不是依赖 RC 内部的通知设置
-- 在 App 文档中明确说明此限制
+**解决方案**：通过 Token 注册端点获取并缓存用户订阅偏好（详见第 3.4 节及 `plugin-design.md` 中的 `PreferenceService`）。
+
+缓存内容来自 `GET /api/v1/subscriptions.get` 响应中的每个订阅记录，包含：
+- `mobilePushNotifications: 'all' | 'mentions' | 'nothing' | undefined`（频道级别移动推送偏好）
+- `disableNotifications: boolean`（完全禁用所有通知）
+
+**注意**：偏好数据在用户注册 CID 时更新，若用户在两次 App 启动之间更改了通知偏好，则本次通知偏好更新需等到下一次 App 启动（或手动刷新）后才生效。手机 App 可在每次前台激活时调用 Token 注册端点刷新偏好数据，以减小此时间窗口。
 
 ### 4.2 API 端点路径变更
+
+**问题**：Token API 路径从 `/api/v1/getui.token` 变为 `/api/apps/public/{appId}/getui-token`。
+
+**缓解措施**：
+- 手机 App 在首次连接时调用服务器发现接口（如 `/api/apps/public/{appId}/info`，或通过约定固定 appId）获取实际端点路径
+- 或在手机 App 中将 RC App 的 appId 作为配置项
+
+### 4.3 房间开关无原生 Admin UI
+
+**问题**：无法在 RC Admin 后台的房间设置页面添加原生"启用个推推送"开关。
+
+**缓解措施**：
+- 使用 Slash 命令（`/getui-push enable` / `/getui-push disable`）切换房间开关
+- 管理员可通过命令快速配置，无需访问 admin 面板
+
+### 4.4 设置位置变更
+
+**问题**：插件设置在 Admin → Apps → GeTui Push 下，而非 Admin → Push 设置分组下。
+
+**缓解措施**：此差异不影响功能，只是 UX 位置不同，管理员可接受。
+
+### 4.5 订阅偏好缓存时效性
+
+**问题**：用户通知偏好由插件缓存，不能实时反映用户在 RC 内的最新设置。
+
+**缓解措施**：
+- 手机 App 每次启动/前台激活时重新调用 Token 注册端点，触发偏好数据刷新
+- 提供 `POST /api/apps/public/{appId}/sync-prefs` 端点，用户可主动刷新偏好
+- 偏好缓存有 TTL（如 24 小时），过期后强制刷新
 
 **问题**：Token API 路径从 `/api/v1/getui.token` 变为 `/api/apps/public/{appId}/getui-token`。
 
@@ -175,7 +216,8 @@ Apps-Engine 为插件提供以下核心能力：
 | 修改核心代码量 | 大（8+ 个文件） | **零**（完全独立） |
 | 可安装/卸载 | ❌ 需重新部署 | ✅ 在线安装/卸载 |
 | 升级隔离性 | ❌ RC 升级可能冲突 | ✅ 插件独立版本管理 |
-| 功能完整性 | 完整（含用户通知偏好） | 接近完整（略有限制） |
+| 功能完整性 | 完整（含用户通知偏好） | **完整**（通过缓存机制实现） |
+| 用户通知偏好（频道级别） | 实时查询 MongoDB | 注册时缓存，偏好有延迟 |
 | API 端点路径 | `/api/v1/getui.token` | `/api/apps/public/{id}/getui-token` |
 | 房间设置入口 | Admin UI 原生开关 | Slash 命令 |
 | 配置位置 | Admin → Push 分组 | Admin → Apps → GeTui Push |
@@ -185,16 +227,26 @@ Apps-Engine 为插件提供以下核心能力：
 
 ## 6. 结论
 
-**个推推送集成完全可以通过 Rocket.Chat Apps-Engine 插件形式实现**，核心功能（个推 API 调用、Token 管理、消息触发推送、插件设置）均可覆盖，仅有以下可接受的限制：
+**个推推送集成完全可以通过 Rocket.Chat Apps-Engine 插件形式实现**，所有核心功能均可完整覆盖：
 
-1. 用户通知偏好检查不可用（缓解：用户通过登出管理）
-2. API 路径格式略有不同（缓解：手机 App 可动态发现）
-3. 房间开关通过 Slash 命令而非 Admin UI 配置（可接受）
+1. ✅ 个推 API 调用（HTTP 调用）
+2. ✅ Token 管理（IPersistence 存储）
+3. ✅ 消息触发推送（IPostMessageSent）
+4. ✅ 插件设置（ISettingsExtend）
+5. ✅ 用户频道级别通知偏好过滤（注册时通过 RC REST API 获取并缓存）
+6. ✅ 频道推送开关（room.customFields + Slash 命令）
+
+仅有以下可接受的非阻塞差异：
+
+1. 偏好数据有轻微延迟（注册时缓存，非实时）——缓解：手机 App 每次启动时刷新
+2. API 路径格式略有不同——缓解：info 端点动态发现
+3. 房间开关通过 Slash 命令而非 Admin UI 配置——可接受
 
 **推荐采用插件方案**，理由：
 - 零核心代码修改，降低维护风险和版本耦合
 - 可打包发布、在线安装，部署更灵活
 - 独立的生命周期管理（安装、更新、卸载）
+- 功能与嵌入式方案实质等同
 
 新的需求文档和设计文档见：
 - [`plugin-requirements.md`](./plugin-requirements.md) — 插件版需求文档
