@@ -261,11 +261,13 @@ IPostMessageSent.executePostMessageSent()
   → 检查 message.room.customFields?.getuiPushEnabled 是否为 true
   → 检查插件全局设置 Getui_Enabled 是否为 true
   → 系统消息（message.type 不为 undefined）跳过
+  → 从 message._unmappedProperties_.mentions 提取 hasMentionToAll/Here/User
   → 获取房间成员列表（read.getRoomReader().getMembers(roomId)）
   → 排除消息发送者（message.sender.id）
-  → 从 IPersistence 查询这些用户的个推 Token（CID）
-  → 对每个有 Token 的用户，从 IPersistence 读取其频道通知偏好缓存
-  → 过滤掉 disableNotifications=true 或 mobilePushNotifications='nothing' 的用户
+  → 从 IPersistence 查询有 Token 的成员
+  → 对每个有 Token 的用户，读取缓存的频道通知偏好（PreferenceService）
+  → 根据偏好过滤（disableNotifications / mobilePushNotifications / muteGroupMentions / userHighlights）
+  → 从 IServerSettingRead 读取服务器默认推送偏好（用于 mobilePushNotifications === undefined 的情况）
   → 构建推送内容
   → 调用个推批量推送 API（IHttp）
 ```
@@ -276,11 +278,15 @@ IPostMessageSent.executePostMessageSent()
 - **FR-004-2**: 在 `checkPostMessageSent` 中进行快速前置检查（enabled 和 getuiPushEnabled），避免不必要的执行
 - **FR-004-3**: 获取房间所有成员，排除消息发送者
 - **FR-004-4**: 批量查询成员的个推 Token，仅向有有效 Token 的用户发送推送
-- **FR-004-5**: 推送对所有用户消息都触发（不仅限于 @提及）
-- **FR-004-6**: 从 `IPersistence` 读取每个用户的频道通知偏好缓存，过滤不应收到推送的用户：
+- **FR-004-5**: 从 `message._unmappedProperties_.mentions` 提取 mentions 数组，用于 @提及判断（`hasMentionToAll`、`hasMentionToHere`、`mentionedUserIds`）
+- **FR-004-6**: 从缓存（IPersistence）读取每个用户的频道通知偏好，执行与 RC 原生 `shouldNotifyMobile()` 等效的过滤逻辑：
   - `disableNotifications === true` → 跳过该用户
   - `mobilePushNotifications === 'nothing'` → 跳过该用户
-  - 偏好未缓存时（新用户首次使用等）→ 默认推送（fail-safe）
+  - `mobilePushNotifications === 'mentions'` → 仅在以下情况发送：用户被直接 @提及、或消息命中 userHighlights 关键词
+  - `muteGroupMentions === true` 且用户未被直接提及 → 跳过 @all / @here 触发的推送
+  - `mobilePushNotifications === undefined` → 使用服务器默认值（`Accounts_Default_User_Preferences_pushNotifications`）
+  - 偏好缓存缺失时（新用户首次使用等）→ 默认推送（fail-safe）
+- **FR-004-7**: 线程消息（`message.threadId` 不为空）的线程关注者推送：缓解策略为对 `mobilePushNotifications === 'all'` 或 `undefined` 的用户仍推送（不因无法获取线程关注者而漏推）
 
 #### 3.4.4 推送内容格式
 
@@ -425,21 +431,32 @@ Apps-Engine 的 `IUser` 对象不暴露每频道通知偏好，但 `IApiRequest.
 
 来自 `ISubscription`（`/api/v1/subscriptions.get` 返回数据）：
 
-| 字段 | 类型 | 含义 |
-|------|------|------|
-| `rid` | string | 频道 ID |
-| `mobilePushNotifications` | `'all' \| 'mentions' \| 'nothing' \| undefined` | 该频道的移动推送级别；`undefined` 表示使用系统默认 |
-| `disableNotifications` | `boolean \| undefined` | `true` 表示该用户已完全禁用此频道的所有通知 |
+| 字段 | 类型 | 含义 | 对应原生逻辑 |
+|------|------|------|------|
+| `rid` | string | 频道 ID | — |
+| `mobilePushNotifications` | `'all' \| 'mentions' \| 'nothing' \| undefined` | 频道移动推送级别；`undefined` 表示使用服务器默认 | `shouldNotifyMobile` 的核心判断 |
+| `disableNotifications` | `boolean \| undefined` | `true` 表示该用户完全禁用此频道的所有通知 | 原生 subscription 查询的 `$ne: true` 过滤 |
+| `muteGroupMentions` | `boolean \| undefined` | `true` 表示屏蔽 @all / @here 提及（除非直接 @提及该用户） | `sendNotification` 中的 `muteGroupMentions` 判断 |
+| `userHighlights` | `string[] \| undefined` | 关键词高亮列表；消息包含这些词时也推送 | `isHighlighted` 判断 |
+
+**补充**：`mobilePushNotifications === undefined` 时，使用服务器设置 `Accounts_Default_User_Preferences_pushNotifications`（可通过 `IServerSettingRead` 实时读取）。用户若在个人偏好中覆盖了全局推送设置，RC 会将该值写入所有频道订阅记录的 `mobilePushNotifications` 字段，因此缓存数据已包含此层级覆盖。
 
 #### 3.10.4 功能要求
 
 - **FR-010-1**: 在 Token 注册端点中，使用用户的 `x-auth-token` 调用 `GET {siteUrl}/api/v1/subscriptions.get` 获取其所有频道订阅数据
-- **FR-010-2**: 将每个频道的 `{ rid, mobilePushNotifications, disableNotifications }` 存入 `IPersistence`，关联到用户 ID
+- **FR-010-2**: 将每个频道的 `{ rid, mobilePushNotifications, disableNotifications, muteGroupMentions, userHighlights }` 存入 `IPersistence`，关联到用户 ID
 - **FR-010-3**: 偏好数据存储时附带 `fetchedAt` 时间戳，用于过期判断
 - **FR-010-4**: 偏好数据 TTL 默认 24 小时，可通过插件设置 `Getui_Pref_Cache_TTL_Hours` 调整
-- **FR-010-5**: 在 `IPostMessageSent` 触发时，从 `IPersistence` 读取收件人的频道偏好，过滤 `disableNotifications=true` 或 `mobilePushNotifications='nothing'` 的用户
-- **FR-010-6**: 若某用户的偏好缓存不存在或已过期，则默认推送（fail-safe），并异步触发刷新
-- **FR-010-7**: 提供 `POST /api/apps/public/{appId}/sync-prefs` 端点（需要鉴权），供手机 App 主动触发偏好刷新；同时支持每次 Token 注册时自动刷新
+- **FR-010-5**: 在 `IPostMessageSent` 触发时，执行与原生 `shouldNotifyMobile()` 等效的完整过滤逻辑：
+  - `disableNotifications === true` → 跳过
+  - `mobilePushNotifications === 'nothing'` → 跳过
+  - `mobilePushNotifications === 'mentions'` → 仅当 `hasMentionToUser === true` 或 `isHighlighted === true` 时推送
+  - `muteGroupMentions === true` 且 `!hasMentionToUser` → 跳过 @all / @here 触发的推送
+  - `mobilePushNotifications === undefined` → 按服务器默认（`IServerSettingRead`）判断
+- **FR-010-6**: `hasMentionToUser`、`hasMentionToAll`、`hasMentionToHere` 从 `message._unmappedProperties_.mentions` 实时计算（无需缓存）
+- **FR-010-7**: `isHighlighted` 通过对比消息文本与缓存的 `userHighlights` 列表计算
+- **FR-010-8**: 若某用户的偏好缓存不存在或已过期，则默认推送（fail-safe），并异步触发刷新
+- **FR-010-9**: 提供 `POST /api/apps/public/{appId}/sync-prefs` 端点（需要鉴权），供手机 App 主动触发偏好刷新；同时支持每次 Token 注册时自动刷新
 
 #### 3.10.5 偏好缓存数据结构
 
@@ -450,6 +467,8 @@ interface UserChannelPrefs {
     rid: string;
     mobilePushNotifications?: 'all' | 'mentions' | 'nothing';
     disableNotifications?: boolean;
+    muteGroupMentions?: boolean;
+    userHighlights?: string[];
   }>;
   fetchedAt: string;  // ISO 日期字符串
 }
@@ -461,8 +480,10 @@ interface UserChannelPrefs {
 
 #### 3.10.6 验收标准
 
-- Token 注册成功后，`IPersistence` 中存在该用户的通知偏好缓存
+- Token 注册成功后，`IPersistence` 中存在该用户的通知偏好缓存（含 `muteGroupMentions` 和 `userHighlights`）
 - 消息推送时，`disableNotifications=true` 或 `mobilePushNotifications='nothing'` 的用户不会收到推送
+- 消息推送时，`mobilePushNotifications='mentions'` 的用户仅在被直接 @提及或消息命中关键词时收到推送
+- `muteGroupMentions=true` 的用户在 @all/@here 时（且未被直接提及）不会收到推送
 - 偏好缓存过期后，下一次 Token 注册或 sync-prefs 调用会自动更新缓存
 - 偏好缓存不存在时，默认推送（不因缓存缺失而漏推）
 
@@ -474,8 +495,9 @@ interface UserChannelPrefs {
 2. **Apps-Engine 版本**: 目标插件 API 兼容当前 Rocket.Chat 版本的 Apps-Engine
 3. **批量推送限制**: 单次请求最多 200 个 CID，需分批处理
 4. **用户账号限制**: 服务端不允许直接注册用户；所有用户必须来自已配置的 OAuth 提供商
-5. **偏好缓存时效性**: 通知偏好在 Token 注册时更新，不能实时反映用户更改；偏好过期后默认推送
-6. **偏好获取范围**: `mobilePushNotifications` 偏好支持 `all`（全部消息）/ `mentions`（仅@提及）/ `nothing`（不推送）三档；本插件当前仅过滤 `nothing`，`mentions` 场景（非@消息）暂不过滤（插件无法从服务端判断是否为提及，需后续版本改进）
+5. **订阅偏好缓存时效性**: 通知偏好在 Token 注册时更新，不能实时反映用户更改；偏好过期后默认推送（fail-safe）
+6. **线程关注者**: 无法获取线程关注者列表（`hasReplyToThread`）；缓解：线程消息对 `mobilePushNotifications === 'all'` 或 `undefined` 的用户仍推送
+7. **mentions 字段**: 通过 `message._unmappedProperties_.mentions` 访问（未在 Apps-Engine TypeScript 类型中声明，为运行时行为，已通过源码分析确认）
 
 ### 4.2 假设
 

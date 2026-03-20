@@ -455,6 +455,28 @@ import { IHttp, IModify, IPersistence, IRead } from '@rocket.chat/apps-engine/de
 import { IMessage } from '@rocket.chat/apps-engine/definition/messages';
 import { ILogger } from '@rocket.chat/apps-engine/definition/accessors';
 
+/** 从 message._unmappedProperties_.mentions 提取 @提及信息 */
+interface MentionInfo {
+  hasMentionToAll: boolean;
+  hasMentionToHere: boolean;
+  mentionedUserIds: string[];
+}
+
+function extractMentions(message: IMessage): MentionInfo {
+  const mentions = (message as any)._unmappedProperties_?.mentions as Array<{
+    _id: string;
+    type?: 'user' | 'team';
+  }> | undefined;
+
+  return {
+    hasMentionToAll:  mentions?.some(m => m._id === 'all') ?? false,
+    hasMentionToHere: mentions?.some(m => m._id === 'here') ?? false,
+    mentionedUserIds: mentions
+      ?.filter(m => !['all','here'].includes(m._id) && (!m.type || m.type === 'user'))
+      .map(m => m._id) ?? [],
+  };
+}
+
 export class PostMessageSentHandler {
   /**
    * 快速前置检查（checkPostMessageSent）：
@@ -470,12 +492,14 @@ export class PostMessageSentHandler {
   /**
    * 主处理逻辑（executePostMessageSent）：
    * 1. 读取插件配置（AppId, AppKey, MasterSecret, ApiUrl）
-   * 2. 获取房间成员列表（read.getRoomReader().getMembers(roomId)）
-   * 3. 排除消息发送者
-   * 4. 从 IPersistence 查询成员的 Token
-   * 5. 无 Token 则跳过
-   * 6. 构建推送通知内容（ContentBuilder）
-   * 7. 调用 GetuiPushService.sendBatch
+   * 2. 从 message._unmappedProperties_.mentions 提取 mentionInfo
+   * 3. 读取服务器默认推送设置（IServerSettingRead）
+   * 4. 获取房间成员列表（read.getRoomReader().getMembers(roomId)）
+   * 5. 排除消息发送者
+   * 6. 从 IPersistence 查询成员的 Token（TokenService）
+   * 7. 对每个有 Token 的用户，通过 PreferenceService 执行推送过滤逻辑
+   * 8. 构建推送通知内容（ContentBuilder）
+   * 9. 调用 GetuiPushService.sendBatch
    */
   static async execute(
     message: IMessage,
@@ -486,6 +510,22 @@ export class PostMessageSentHandler {
     logger: ILogger,
   ): Promise<void>;
 }
+```
+
+**推送过滤逻辑（对每个有 Token 的用户执行）：**
+
+```
+shouldSendPush(userId, rid, mentionInfo, userPrefs, serverDefault) → boolean:
+  1. if userPrefs.disableNotifications === true → false
+  2. if userPrefs.mobilePushNotifications === 'nothing' → false
+  3. effectivePref = userPrefs.mobilePushNotifications ?? serverDefault
+  4. if effectivePref === 'mentions':
+       hasMentionToUser = mentionInfo.mentionedUserIds.includes(userId)
+       isHighlighted = containsHighlight(message.text, userPrefs.userHighlights)
+       if !hasMentionToUser && !isHighlighted → false
+  5. if userPrefs.muteGroupMentions && !hasMentionToUser:
+       if hasMentionToAll || hasMentionToHere → false
+  6. → true
 ```
 
 ---
@@ -528,6 +568,14 @@ export class GetuiTokenRegisterEndpoint implements IApiEndpoint {
       userId: user.id,
       platform,
     }, maxPerUser);
+
+    // 异步获取并缓存用户的频道通知偏好
+    // x-auth-token 已通过鉴权，此处直接从 headers 中取用
+    const siteUrl = await read.getEnvironmentReader().getServerSettings().getValueById('Site_Url') as string;
+    const authToken = request.headers['x-auth-token'] as string;
+    const ttlHours = await read.getEnvironmentReader().getSettings().getValueById('Getui_Pref_Cache_TTL_Hours') as number;
+    PreferenceService.fetchAndCache(http, persis, user.id, authToken, siteUrl, ttlHours)
+      .catch(err => logger.error('Failed to cache user prefs:', err));
 
     return { status: HttpStatusCode.OK, content: { success: true, token: record.token, userId: record.userId } };
   }
@@ -654,7 +702,97 @@ export class GetUiPushCommand implements ISlashCommand {
 
 ---
 
-### 3.8 推送内容构建 (`ContentBuilder.ts`)
+### 3.8 偏好服务 (`PreferenceService.ts`)
+
+**技术背景**：Apps-Engine 的任何 Bridge 均不暴露 `ISubscription` 的通知偏好字段。通过逐一分析 `RoomBridge`、`UserBridge`、`MessageBridge`、`InternalBridge` 源码确认。
+
+**解决方案**：`IApiRequest.headers` 透传原始 HTTP 请求头（含 `x-auth-token`），插件在 Token 注册端点获取用户凭证后调用 RC REST API 获取并缓存订阅数据。
+
+```typescript
+interface ChannelPref {
+  rid: string;
+  mobilePushNotifications?: 'all' | 'mentions' | 'nothing';
+  disableNotifications?: boolean;
+  muteGroupMentions?: boolean;
+  userHighlights?: string[];
+}
+
+interface UserPrefsCache {
+  userId: string;
+  prefs: ChannelPref[];
+  fetchedAt: string;   // ISO 日期字符串
+}
+
+export class PreferenceService {
+  /** TTL 默认 24 小时（可通过设置覆盖） */
+  private static readonly DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
+
+  /**
+   * 在 Token 注册端点中调用：
+   * 1. 用 x-auth-token 调用 GET {siteUrl}/api/v1/subscriptions.get
+   * 2. 从结果提取 { rid, mobilePushNotifications, disableNotifications,
+   *                  muteGroupMentions, userHighlights }
+   * 3. 存入 IPersistence，关联 userId
+   */
+  static async fetchAndCache(
+    http: IHttp,
+    persis: IPersistence,
+    userId: string,
+    authToken: string,
+    siteUrl: string,
+    ttlHours?: number,
+  ): Promise<void>;
+
+  /**
+   * 读取缓存的频道偏好；若不存在或已过期则返回 null
+   * （调用方应在 null 时默认推送，并异步触发刷新）
+   */
+  static async getForRoom(
+    persis: IPersistenceRead,
+    userId: string,
+    rid: string,
+    ttlHours?: number,
+  ): Promise<ChannelPref | null>;
+
+  /**
+   * 核心过滤方法：判断是否应向该用户发送推送
+   *
+   * 与原生 shouldNotifyMobile() 等效，覆盖：
+   *  - disableNotifications
+   *  - mobilePushNotifications (all / mentions / nothing / undefined→server default)
+   *  - muteGroupMentions + hasMentionToAll/Here
+   *  - userHighlights (isHighlighted)
+   *
+   * 不支持：
+   *  - hasReplyToThread（线程关注者，Apps-Engine 无接口）
+   */
+  static shouldSendPush(params: {
+    userId: string;
+    pref: ChannelPref | null;
+    serverDefault: 'all' | 'mentions' | 'nothing';
+    hasMentionToUser: boolean;
+    hasMentionToAll: boolean;
+    hasMentionToHere: boolean;
+    messageText?: string;
+  }): boolean;
+}
+```
+
+**`shouldSendPush` 逻辑：**
+
+```
+1. if pref?.disableNotifications → return false
+2. if pref?.mobilePushNotifications === 'nothing' → return false
+3. effectivePref = pref?.mobilePushNotifications ?? serverDefault
+4. if effectivePref === 'mentions':
+     isHighlighted = containsAny(messageText, pref?.userHighlights)
+     if !hasMentionToUser && !isHighlighted → return false
+5. if pref?.muteGroupMentions && !hasMentionToUser:
+     if hasMentionToAll || hasMentionToHere → return false
+6. return true   // 包含 effectivePref === 'all' 及 pref 为 null（fail-safe）
+```
+
+---
 
 ```typescript
 import { IMessage } from '@rocket.chat/apps-engine/definition/messages';
