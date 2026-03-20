@@ -250,6 +250,7 @@ interface IGetuiPushToken {
   → 如为 true：
     → 查询该房间的所有成员（具有阅读权限的用户）
     → 排除消息发送者
+    → 过滤掉关闭了移动推送通知的用户（shouldNotifyMobile 检查）
     → 查询这些用户的个推 Token（CID）
     → 构建推送内容（标题、正文、负载）
     → 调用个推批量推送 API
@@ -262,7 +263,7 @@ interface IGetuiPushToken {
 - **FR-004-3**: 批量查询成员的个推 Token
 - **FR-004-4**: 仅向拥有有效 Token 的用户发送推送
 - **FR-004-5**: 推送操作应异步执行，不阻塞消息保存流程
-- **FR-004-6**: 需要尊重用户级别的通知偏好设置（如用户关闭了移动推送则不推送）
+- **FR-004-6**: 必须尊重用户级别的通知偏好设置：仅当用户的消息设置允许移动推送（`shouldNotifyMobile` 返回 true）时才向该用户推送
 - **FR-004-7**: 推送所有消息，不仅限于 @提及
 
 #### 3.4.4 推送内容格式
@@ -272,8 +273,7 @@ interface IGetuiPushToken {
   "notification": {
     "title": "频道名称 - 发送者",
     "body": "消息内容（截取前 200 字符）",
-    "click_type": "intent",
-    "intent": "rocket-getui-app://message?host=<serverUrl>&rid=<roomId>&msgId=<messageId>"
+    "click_type": "payload"
   },
   "transmission": {
     "host": "<服务器地址>",
@@ -308,7 +308,7 @@ interface IGetuiPushToken {
 | `Getui_Enabled` | boolean | false | 启用/禁用个推推送服务 |
 | `Getui_AppId` | string | '' | 个推应用 AppID |
 | `Getui_AppKey` | string | '' | 个推应用 AppKey |
-| `Getui_MasterSecret` | string (secret) | '' | 个推应用 MasterSecret |
+| `Getui_MasterSecret` | password | '' | 个推应用 MasterSecret |
 | `Getui_Api_Url` | string | 'https://restapi.getui.com/v2' | 个推 REST API 基础 URL |
 | `Getui_Max_Tokens_Per_User` | int | 1 | 每用户最大 Token 数量 |
 
@@ -403,6 +403,7 @@ interface IGetuiPushToken {
 3. **推送频率限制**: 个推批量推送限制为每日 200 万次推送，需合理规划
 4. **不修改现有推送**: 保留 FCM/APNs 现有推送流程不变
 5. **兼容 Rocket.Chat 官方 App**: 官方 App 使用 FCM 推送，不做改动
+6. **用户账号限制**: 服务端**不允许**直接注册新用户，所有用户必须通过已配置的 OAuth 提供商认证后方可使用；`POST /api/v1/getui.token` 需要有效的登录态（通过 OAuth 获得）
 
 ### 4.2 假设
 

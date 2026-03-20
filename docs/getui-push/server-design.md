@@ -315,9 +315,10 @@ export class GetuiPushService extends ServiceClassInternal {
    * 1. 检查房间 getuiPushEnabled
    * 2. 检查全局 Getui_Enabled
    * 3. 获取房间成员列表（排除发送者）
-   * 4. 查询成员的个推 Token
-   * 5. 构建推送内容
-   * 6. 调用 sendBatchPush
+   * 4. 对每个成员执行 shouldNotifyMobile() 检查，过滤关闭移动推送的用户
+   * 5. 查询剩余成员的个推 Token
+   * 6. 构建推送内容
+   * 7. 调用 sendBatchPush
    */
   async handleNewMessage(message: IMessage, room: IRoom): Promise<void>;
 
@@ -628,6 +629,8 @@ async function triggerGetuiPush(message: IMessage, room: IRoom): Promise<void> {
 }
 ```
 
+`handleNewMessage` 内部在查询成员后，需对每个成员执行 `shouldNotifyMobile()` 检查，仅向通知偏好允许推送的用户发送。
+
 ### 2.7 全局配置
 
 **文件**: `apps/meteor/server/settings/push.ts`
@@ -688,7 +691,7 @@ await settingsRegistry.addGroup('Push', async function () {
 
 ### 2.8 i18n 国际化
 
-**文件**: `apps/meteor/packages/rocketchat-i18n/i18n/en.i18n.json`（英文）及 `zh-CN.i18n.json`（中文）
+**文件**: `packages/i18n/src/locales/en.i18n.json`（英文）及 `zh.i18n.json`（中文）
 
 ```json
 // en.i18n.json
@@ -705,7 +708,7 @@ await settingsRegistry.addGroup('Push', async function () {
   "GeTui_Push_Not_Enabled": "GeTui push is not enabled"
 }
 
-// zh-CN.i18n.json
+// zh.i18n.json
 {
   "GeTui_Enabled": "启用个推推送",
   "GeTui_Enabled_Description": "启用个推推送服务，用于国内推送通道",
@@ -743,13 +746,14 @@ await settingsRegistry.addGroup('Push', async function () {
 | `packages/core-typings/src/index.ts` | 导出 `IGetuiPushToken` |
 | `packages/model-typings/src/models/index.ts` | 导出 `IGetuiPushTokenModel` |
 | `packages/models/src/index.ts` | 导出 `GetuiPushToken` |
-| `apps/meteor/server/models/startup.ts` | 注册 GetuiPushToken 模型 |
+| `apps/meteor/server/models.ts` | 注册 GetuiPushToken 模型（OSS） |
+| `apps/meteor/ee/server/models/startup.ts` | 注册 GetuiPushToken 模型（EE） |
 | `apps/meteor/app/channel-settings/server/methods/saveRoomSettings.ts` | 支持 `getuiPushEnabled` 设置 |
 | `packages/models/src/models/Rooms.ts` | 新增 `setGetuiPushEnabledById` 方法 |
 | `apps/meteor/server/settings/push.ts` | 添加 GeTui 配置项 |
 | `apps/meteor/app/lib/server/lib/sendNotificationsOnMessage.ts` | 添加个推推送触发逻辑 |
-| `apps/meteor/packages/rocketchat-i18n/i18n/en.i18n.json` | 英文翻译 |
-| `apps/meteor/packages/rocketchat-i18n/i18n/zh-CN.i18n.json` | 中文翻译 |
+| `packages/i18n/src/locales/en.i18n.json` | 英文翻译 |
+| `packages/i18n/src/locales/zh.i18n.json` | 中文翻译 |
 
 ## 4. 推送时序图
 

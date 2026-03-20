@@ -61,13 +61,13 @@ getui-push-app/
 │   ├── pages/                      # 页面
 │   │   ├── login/
 │   │   │   ├── server-config.vue   # 服务器配置页
-│   │   │   └── webview-login.vue   # WebView 登录页
+│   │   │   └── webview-login.vue   # OAuth PKCE 登录页（唯一 WebView 页面）
 │   │   ├── home/
 │   │   │   └── index.vue           # 主页
 │   │   ├── settings/
 │   │   │   └── index.vue           # 设置页
-│   │   └── webview/
-│   │       └── message.vue         # 消息 WebView 页
+│   │   └── notification/
+│   │       └── detail.vue          # 原生通知详情页（替代 WebView 方案）
 │   │
 │   ├── services/                   # 业务服务
 │   │   ├── auth.service.ts         # 认证服务
@@ -139,9 +139,9 @@ getui-push-app/
       }
     },
     {
-      "path": "pages/webview/message",
+      "path": "pages/notification/detail",
       "style": {
-        "navigationBarTitleText": "消息"
+        "navigationBarTitleText": "通知详情"
       }
     }
   ],
@@ -225,29 +225,53 @@ import { pushService } from './push.service';
 import { storageService } from './storage.service';
 
 /**
- * 认证服务 - 管理用户登录/登出流程
+ * 认证服务 - 管理用户 OAuth PKCE 登录/登出流程
+ *
+ * 安全说明: 使用 PKCE (Proof Key for Code Exchange, RFC 7636)，
+ * 无需在 App 中嵌入 client_secret，即使 APK 被反编译也不会泄露密钥。
  */
 class AuthService {
   /**
-   * WebView 登录流程
-   *
-   * 1. 打开 WebView 加载 Rocket.Chat 登录页
-   * 2. 监听 WebView 消息，等待登录成功回调
-   * 3. 回调方式:
-   *    a. 拦截 URL: 检查 URL 是否包含 credential token 参数
-   *    b. Cookie 提取: 从 Cookie 中获取 rc_token
-   *    c. postMessage: 监听 window.postMessage 事件
+   * 生成 PKCE 参数
+   * - code_verifier: 随机 64 字节，Base64URL 编码
+   * - code_challenge: BASE64URL(SHA256(code_verifier))
    */
-  async startWebViewLogin(serverUrl: string): Promise<AuthCredentials>;
+  private generatePKCE(): { codeVerifier: string; codeChallenge: string };
 
   /**
-   * 处理 WebView 登录回调
-   * - 提取 authToken 和 userId
-   * - 调用 /api/v1/me 验证
-   * - 保存到安全存储
+   * 启动 OAuth PKCE 登录流程
+   *
+   * 1. 生成 code_verifier 和 code_challenge
+   * 2. 打开 WebView 加载服务器 OAuth 授权页:
+   *    /oauth/authorize?response_type=code&client_id={publicClientId}
+   *      &redirect_uri=rcpush://oauth&code_challenge={challenge}
+   *      &code_challenge_method=S256
+   * 3. WebView 拦截 rcpush://oauth?code={authCode} 重定向
+   * 4. 关闭 WebView，返回授权码
+   */
+  async startOAuthLogin(serverUrl: string): Promise<string>; // returns authCode
+
+  /**
+   * 使用授权码换取访问令牌（无需 client_secret）
+   *
+   * POST /oauth/token
+   * { grant_type: 'authorization_code', code, redirect_uri,
+   *   client_id, code_verifier }
+   * → 返回 access_token（RC authToken）和 userId
+   */
+  async exchangeCodeForToken(params: {
+    serverUrl: string;
+    authCode: string;
+    codeVerifier: string;
+  }): Promise<AuthCredentials>;
+
+  /**
+   * 处理登录完成回调
+   * - 保存 authToken 和 userId 到安全存储
+   * - 更新 Auth Store
    * - 触发 Token 注册
    */
-  async handleLoginCallback(credentials: AuthCredentials): Promise<void>;
+  async handleLoginComplete(credentials: AuthCredentials): Promise<void>;
 
   /**
    * 自动登录
@@ -361,6 +385,9 @@ export const pushService = new PushService();
 ```typescript
 /**
  * 跳转服务 - 管理从通知到目标应用/页面的跳转
+ *
+ * 策略: 优先 Deep Link 跳转官方 App；失败时跳转到原生通知详情页。
+ * 禁止使用 WebView 打开消息页面。
  */
 class JumpService {
   /**
@@ -373,7 +400,7 @@ class JumpService {
    *
    * 策略:
    * 1. 尝试 Deep Link 跳转到官方 App
-   * 2. 如果失败，回退到 WebView
+   * 2. 如果失败，跳转到应用内原生通知详情页（不使用 WebView）
    *
    * @param params 跳转参数
    */
@@ -382,6 +409,9 @@ class JumpService {
     rid: string;
     msgId: string;
     roomName?: string;
+    senderName?: string;
+    title?: string;
+    body?: string;
   }): Promise<void>;
 
   /**
@@ -407,7 +437,7 @@ class JumpService {
    * 超时检测:
    * - 设置 2 秒超时
    * - 如果 2 秒后应用仍在前台，说明跳转失败
-   * - 回退到 WebView 方案
+   * - 回退到原生通知详情页
    */
   async openWithDeepLink(params: {
     host: string;
@@ -416,18 +446,19 @@ class JumpService {
   }): Promise<boolean>;
 
   /**
-   * WebView 回退方案
+   * 跳转到原生通知详情页（不使用 WebView）
    *
-   * 打开内部 WebView 页面，加载:
-   *   {host}/channel/{roomName}?msg={msgId}
-   *
-   * WebView 中会使用已保存的登录态
+   * 展示通知摘要：标题、正文、发送者、频道名；
+   * 提供"打开官方 App"或"前往市场下载"按钮。
    */
-  openInWebView(params: {
+  openNotificationDetail(params: {
     host: string;
     rid: string;
     msgId: string;
     roomName?: string;
+    senderName?: string;
+    title?: string;
+    body?: string;
   }): void;
 }
 
@@ -466,8 +497,8 @@ class StorageService {
 
   /**
    * 保存认证信息
-   * 使用 uni.setStorageSync 存储
-   * 注：生产环境建议使用加密存储
+   * 优先使用平台安全存储（Android KeyStore / 鸿蒙 HUKS）
+   * 降级方案：uni.setStorageSync（仅限开发/测试环境）
    */
   saveAuth(auth: { token: string; userId: string; userName: string }): void;
 
@@ -692,55 +723,57 @@ export default {
 };
 ```
 
-#### 2.5.2 WebView 登录页设计
+#### 2.5.2 OAuth 登录页设计
 
 **文件**: `src/pages/login/webview-login.vue`
 
 ```
-核心逻辑:
-1. 加载 Rocket.Chat 服务器 URL 到 WebView
-2. 监听 WebView 的 URL 变化和消息事件
-3. 检测登录成功:
-   方案 A: 拦截包含 credential token 的 URL redirect
-   方案 B: 定期检查 Cookie 中的 rc_token
-   方案 C: 注入 JS 代码监听 Meteor.loginToken 变化
-4. 获取到 authToken + userId 后调用 handleLoginCallback
+核心逻辑（OAuth PKCE 流程）:
+1. 从 authService 接收 code_challenge 和 redirect_uri
+2. 构建授权 URL:
+   {serverUrl}/oauth/authorize
+     ?response_type=code
+     &client_id={publicClientId}
+     &redirect_uri=rcpush://oauth
+     &code_challenge={code_challenge}
+     &code_challenge_method=S256
+3. 加载该 URL 到 WebView
+4. 监听 WebView URL 变化事件（@load / onUrlChange）
+5. 检测重定向到 rcpush://oauth?code=... 时：
+   - 提取 code 参数
+   - 关闭 WebView
+   - 通知 authService 完成授权码交换
+6. WebView 不注入任何脚本来读取 localStorage 或 Cookie
 
-WebView 消息拦截策略:
-- @onPostMessage: 监听来自 WebView 的 postMessage
-- @load: 页面加载完成后注入监听脚本
-- @error: 处理加载错误
+WebView 安全配置:
+- 仅允许加载服务器域名（白名单）
+- 禁止访问本地文件
+- 禁止 JavaScript 读取设备存储
+- 仅用于此 OAuth 登录流程，其他页面均使用原生界面
 ```
 
-WebView 注入脚本（用于获取登录凭证）:
+> **注意**: 此 WebView 页面是应用中**唯一**的 WebView 页面，仅用于 OAuth 登录授权。
 
-```javascript
-// 注入到 WebView 中的脚本
-(function() {
-  // 监听 localStorage 变化
-  const checkLogin = setInterval(function() {
-    try {
-      const token = localStorage.getItem('Meteor.loginToken');
-      const userId = localStorage.getItem('Meteor.userId');
-      if (token && userId) {
-        clearInterval(checkLogin);
-        // 通过 postMessage 发送给 uni-app
-        uni.postMessage({
-          data: {
-            type: 'login_success',
-            authToken: token,
-            userId: userId
-          }
-        });
-      }
-    } catch(e) {}
-  }, 1000);
+WebView 登录成功回调处理:
 
-  // 30 秒后停止检查
-  setTimeout(function() {
-    clearInterval(checkLogin);
-  }, 300000);
-})();
+```typescript
+// 监听 WebView URL 变化
+onUrlChange(event: { url: string }) {
+  if (event.url.startsWith('rcpush://oauth')) {
+    const url = new URL(event.url);
+    const code = url.searchParams.get('code');
+    if (code) {
+      // 关闭 WebView，使用 code + code_verifier 换取 token
+      authService.exchangeCodeForToken({
+        serverUrl: this.serverUrl,
+        authCode: code,
+        codeVerifier: this.codeVerifier,
+      }).then(() => {
+        uni.redirectTo({ url: '/pages/home/index' });
+      });
+    }
+  }
+}
 ```
 
 #### 2.5.3 主页面设计
@@ -806,26 +839,19 @@ WebView 注入脚本（用于获取登录凭证）:
 // jumpService.navigateToMessage 实现逻辑
 
 async navigateToMessage(params) {
-  const { host, rid, msgId, roomName } = params;
+  const { host, rid, msgId, roomName, senderName, title, body } = params;
 
   // 1. 检查官方 App 是否安装
   const isInstalled = await this.isOfficialAppInstalled();
 
   if (isInstalled) {
     // 2. 尝试 Deep Link
-    const deepLinkUrl = `rocketchat://room/${rid}?host=${encodeURIComponent(host)}&messageId=${msgId}`;
-
-    try {
-      // 使用 plus.runtime.openURL 尝试打开
-      const success = await this.openWithDeepLink({ host, rid, msgId });
-      if (success) return; // 跳转成功
-    } catch (error) {
-      console.log('Deep link failed, falling back to WebView');
-    }
+    const success = await this.openWithDeepLink({ host, rid, msgId });
+    if (success) return; // 跳转成功
   }
 
-  // 3. 回退到 WebView
-  this.openInWebView({ host, rid, msgId, roomName });
+  // 3. 回退到原生通知详情页（不使用 WebView）
+  this.openNotificationDetail({ host, rid, msgId, roomName, senderName, title, body });
 }
 ```
 
@@ -928,24 +954,33 @@ private async request<T>(
 ### 3.1 认证信息安全
 
 ```
+鉴权方案: OAuth 2.0 PKCE (RFC 7636)
+- 不在 App 中嵌入任何 client_secret
+- code_verifier 在运行时动态生成，不持久化存储
+- 即使 APK 被反编译，也无法从中提取用于伪造请求的密钥
+
 存储策略:
-- authToken: 使用 uni.setStorageSync 存储（加密存储需原生插件支持）
+- authToken: 优先使用平台安全存储（Android KeyStore / 鸿蒙 HUKS），不可用时降级为 uni.setStorageSync
 - 传输中: 始终使用 HTTPS（生产环境）
 - 内存中: 使用 Pinia Store 管理，应用退出后清理
 
-安全增强（可选）:
-- Android: 使用 Android KeyStore 加密敏感数据
-- 鸿蒙 Next: 使用 HUKS（HarmonyOS Universal KeyStore）
+安全存储实现:
+- Android: 通过 uni-app 原生插件调用 Android KeyStore API 加密 authToken
+- 鸿蒙 Next: 使用 HUKS（HarmonyOS Universal KeyStore）存储敏感凭证
+- 降级方案: 若原生插件不可用，使用 uni.setStorageSync（仅限开发/测试环境）
 ```
 
 ### 3.2 WebView 安全
 
 ```
+WebView 仅用于 OAuth 登录授权流程，其他页面均使用原生界面。
+
 限制措施:
-- 限制 WebView 仅加载已配置的服务器域名
+- WebView 仅允许加载已配置的服务器域名（白名单）
 - 禁止 WebView 访问本地文件系统
-- 注入脚本经过安全审查
+- 不向 WebView 注入读取 localStorage/Cookie 的脚本
 - 通过 CSP（Content Security Policy）限制资源加载
+- 登录完成后立即关闭 WebView
 ```
 
 ### 3.3 推送内容安全
@@ -954,6 +989,7 @@ private async request<T>(
 - 推送内容由服务端控制，客户端不做敏感数据处理
 - 通知展示遵循服务端隐私设置
 - 本地通知记录定期清理（最多保存 50 条）
+- 消息详情不通过 WebView 展示，避免 WebView 注入攻击
 ```
 
 ## 4. 构建与部署
