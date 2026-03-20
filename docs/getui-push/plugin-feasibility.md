@@ -233,26 +233,6 @@ Apps-Engine 所有 Bridge 均**不暴露** `ISubscription` 的通知偏好字段
 
 **缓解措施**：在 `GET /api/v1/subscriptions.get` 返回的订阅数据中，若用户设置了个人全局覆盖，该覆盖值已被写入 `subscription.mobilePushNotifications`（通过 `updateNotificationPreferences` 写入）；因此，**实际上缓存的 `subscription.mobilePushNotifications` 已经包含了用户级别的覆盖**，此限制在多数情况下不成立。
 
-**问题**：Token API 路径从 `/api/v1/getui.token` 变为 `/api/apps/public/{appId}/getui-token`。
-
-**缓解措施**：
-- 手机 App 在首次连接时调用服务器发现接口（如 `/api/v1/apps/getui-push/info`，或通过约定固定 appId）获取实际端点路径
-- 或在手机 App 中将 RC App 的 appId 作为配置项
-
-### 4.3 房间开关无原生 Admin UI
-
-**问题**：无法在 RC Admin 后台的房间设置页面添加原生"启用个推推送"开关。
-
-**缓解措施**：
-- 使用 Slash 命令（`/getui-push enable` / `/getui-push disable`）切换房间开关
-- 管理员可通过命令快速配置，无需访问 admin 面板
-
-### 4.4 设置位置变更
-
-**问题**：插件设置在 Admin → Apps → GeTui Push 下，而非 Admin → Push 设置分组下。
-
-**缓解措施**：此差异不影响功能，只是 UX 位置不同，管理员可接受。
-
 ## 5. 方案对比
 
 | 维度 | 嵌入式方案 | 插件方案 |

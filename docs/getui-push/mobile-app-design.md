@@ -497,8 +497,8 @@ class StorageService {
 
   /**
    * 保存认证信息
-   * 使用 uni.setStorageSync 存储
-   * 注：生产环境建议使用加密存储
+   * 优先使用平台安全存储（Android KeyStore / 鸿蒙 HUKS）
+   * 降级方案：uni.setStorageSync（仅限开发/测试环境）
    */
   saveAuth(auth: { token: string; userId: string; userName: string }): void;
 
@@ -960,13 +960,14 @@ private async request<T>(
 - 即使 APK 被反编译，也无法从中提取用于伪造请求的密钥
 
 存储策略:
-- authToken: 使用 uni.setStorageSync 存储（加密存储需原生插件支持）
+- authToken: 优先使用平台安全存储（Android KeyStore / 鸿蒙 HUKS），不可用时降级为 uni.setStorageSync
 - 传输中: 始终使用 HTTPS（生产环境）
 - 内存中: 使用 Pinia Store 管理，应用退出后清理
 
-安全增强（可选）:
-- Android: 使用 Android KeyStore 加密敏感数据
-- 鸿蒙 Next: 使用 HUKS（HarmonyOS Universal KeyStore）
+安全存储实现:
+- Android: 通过 uni-app 原生插件调用 Android KeyStore API 加密 authToken
+- 鸿蒙 Next: 使用 HUKS（HarmonyOS Universal KeyStore）存储敏感凭证
+- 降级方案: 若原生插件不可用，使用 uni.setStorageSync（仅限开发/测试环境）
 ```
 
 ### 3.2 WebView 安全

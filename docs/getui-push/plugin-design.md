@@ -70,6 +70,7 @@ getui-push-app/                    # RC App 插件根目录
 ├── endpoints/
 │   ├── GetuiTokenRegisterEndpoint.ts  # POST getui-token
 │   ├── GetuiTokenDeleteEndpoint.ts    # DELETE getui-token
+│   ├── SyncPrefsEndpoint.ts           # POST sync-prefs
 │   └── InfoEndpoint.ts                # GET info
 ├── handlers/
 │   ├── PostMessageSentHandler.ts      # IPostMessageSent 实现
@@ -80,6 +81,7 @@ getui-push-app/                    # RC App 插件根目录
 │   ├── GetuiAuthService.ts            # 个推鉴权 Token 管理
 │   ├── GetuiPushService.ts            # 批量推送
 │   ├── TokenService.ts                # Token CRUD
+│   ├── PreferenceService.ts           # 频道通知偏好缓存与过滤
 │   └── ContentBuilder.ts             # 推送内容构建
 └── types/
     └── index.ts                       # 内部类型定义
@@ -172,6 +174,14 @@ export class GetuiPushApp extends App
       public: false,
       i18nLabel: 'GeTui_Max_Tokens_Per_User',
     });
+    await configuration.settings.provideSetting({
+      id: 'Getui_Pref_Cache_TTL_Hours',
+      type: SettingType.NUMBER,
+      packageValue: 24,
+      required: false,
+      public: false,
+      i18nLabel: 'GeTui_Pref_Cache_TTL_Hours',
+    });
 
     // === API 端点 ===
     await configuration.api.provideApi({
@@ -180,6 +190,7 @@ export class GetuiPushApp extends App
       endpoints: [
         new GetuiTokenRegisterEndpoint(this),
         new GetuiTokenDeleteEndpoint(this),
+        new SyncPrefsEndpoint(this),
         new InfoEndpoint(this),
       ],
     });
@@ -971,11 +982,13 @@ RC Core              PostMessageSentHandler     GetuiPushService        个推 A
 | `services/GetuiAuthService.ts` | 个推鉴权 Token 管理 |
 | `services/GetuiPushService.ts` | 批量推送服务 |
 | `services/TokenService.ts` | Token CRUD（使用 IPersistence） |
+| `services/PreferenceService.ts` | 频道通知偏好缓存与过滤（`shouldSendPush` 逻辑） |
 | `services/ContentBuilder.ts` | 推送内容构建 |
 | `handlers/PostMessageSentHandler.ts` | 消息发送后处理 |
 | `handlers/PostUserLoggedOutHandler.ts` | 用户登出后清理 Token |
 | `endpoints/GetuiTokenRegisterEndpoint.ts` | POST Token 端点 |
 | `endpoints/GetuiTokenDeleteEndpoint.ts` | DELETE Token 端点 |
+| `endpoints/SyncPrefsEndpoint.ts` | POST 偏好强制刷新端点 |
 | `endpoints/InfoEndpoint.ts` | 插件发现端点 |
 | `commands/GetUiPushCommand.ts` | `/getui-push` Slash 命令 |
 | `i18n/en.json` | 英文 i18n（插件 i18n） |
@@ -989,7 +1002,8 @@ RC Core              PostMessageSentHandler     GetuiPushService        个推 A
 
 | 限制 | 说明 | 缓解措施 |
 |------|------|----------|
-| 不检查用户移动通知偏好 | Apps-Engine 未暴露该字段 | 用户通过登出删除 Token 来退出推送 |
-| API 路径与嵌入式方案不同 | `/api/apps/public/{appId}/getui-token` | 手机 App 通过 `/info` 端点动态发现路径 |
+| 仅通过缓存检查用户移动通知偏好（非实时） | Apps-Engine 未暴露实时偏好字段；`PreferenceService` 在用户注册 Token 时缓存订阅偏好，偏好变更存在最长 24 小时延迟 | 手机 App 每次启动/前台激活时刷新 Token 注册端点；用户也可调用 `/sync-prefs` 强制刷新 |
+| 无法获取线程关注者（hasReplyToThread） | Apps-Engine 无接口查询线程订阅关系 | 线程消息对 `mobilePushNotifications === 'all'` 或 `undefined` 的用户仍推送（fail-open） |
+| API 路径与嵌入式方案不同 | `/api/apps/public/{appId}/getui-token` | 手机 App 通过 `GET /api/apps/public/{appId}/info` 端点动态发现路径 |
 | 房间开关无原生 Admin UI | 无法在房间设置面板添加开关 | 管理员通过 `/getui-push enable/disable` 命令操作 |
 | 设置在 Apps 页面而非 Push 页面 | UX 位置不同 | 可接受，功能完整 |
